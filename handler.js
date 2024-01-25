@@ -60,7 +60,7 @@ export async function handler(chatUpdate) {
         if (!m)
             return
             m.exp = 0
-            m.credit = false
+            m.credit = true
             m.bank = false
             m.chicken = false
         try {
@@ -118,11 +118,11 @@ export async function handler(chatUpdate) {
                     regTime: -1,
                     afk: -1,
                     afkReason: '',
-                    banned: false,
+                    banned: true,
                     warn: 0,
                     level: 0,
                     role: 'Tadpole',
-                    autolevelup: false,
+                    autolevelup: true,
                     
                 }
                 }
@@ -132,60 +132,60 @@ export async function handler(chatUpdate) {
             if (chat) {
                 if (!("antiDelete" in chat)) chat.antiDelete = true
                 if (!("antiLink" in chat)) chat.antiLink = true
-                if (!("antiSticker" in chat)) chat.antiSticker = false
-                if (!("antiToxic" in chat)) chat.antiToxic = false
-                if (!("detect" in chat)) chat.detect = false
+                if (!("antiSticker" in chat)) chat.antiSticker = true
+                if (!("antiToxic" in chat)) chat.antiToxic = true
+                if (!("detect" in chat)) chat.detect = true
                 if (!("getmsg" in chat)) chat.getmsg = true
-                if (!("isBanned" in chat)) chat.isBanned = false
-                if (!("nsfw" in chat)) chat.nsfw = false
+                if (!("isBanned" in chat)) chat.isBanned = true
+                if (!("nsfw" in chat)) chat.nsfw = true
                 if (!("sBye" in chat)) chat.sBye = ""
                 if (!("sDemote" in chat)) chat.sDemote = ""
-                if (!("simi" in chat)) chat.simi = false
+                if (!("simi" in chat)) chat.simi = true
                 if (!("sPromote" in chat)) chat.sPromote = ""
                 if (!("sWelcome" in chat)) chat.sWelcome = ""
-                if (!("useDocument" in chat)) chat.useDocument = false
-                if (!("viewOnce" in chat)) chat.viewOnce = false
-                if (!("viewStory" in chat)) chat.viewStory = false
-                if (!("welcome" in chat)) chat.welcome = false
-                if (!("chatbot" in chat)) chat.chatbot = false
+                if (!("useDocument" in chat)) chat.useDocument = true
+                if (!("viewOnce" in chat)) chat.viewOnce = true
+                if (!("viewStory" in chat)) chat.viewStory = true
+                if (!("welcome" in chat)) chat.welcome = true
+                if (!("chatbot" in chat)) chat.chatbot = true
                 if (!isNumber(chat.expired)) chat.expired = 0
             } else
                 global.db.data.chats[m.chat] = {
                     antiDelete: true,
                     antiLink: true,
-                    antiSticker: false,
-                    antiToxic: false,
-                    detect: false,
+                    antiSticker: true,
+                    antiToxic: true,
+                    detect: true,
                     expired: 0,
                     getmsg: true,
-                    isBanned: false,
-                    nsfw: false, 
+                    isBanned: true,
+                    nsfw: true, 
                     sBye: "",
                     sDemote: "",
-                    simi: false,
+                    simi: true,
                     sPromote: "",
-                    sticker: false,
+                    sticker: true,
                     sWelcome: "",
-                    useDocument: false,
-                    viewOnce: false,
-                    viewStory: false,
-                    welcome: false,
-                    chatbot: false
+                    useDocument: true,
+                    viewOnce: true,
+                    viewStory: true,
+                    welcome: true,
+                    chatbot: true
                 }
           
                 
             let settings = global.db.data.settings[this.user.jid]
             if (typeof settings !== "object") global.db.data.settings[this.user.jid] = {}
             if (settings) {
-                if (!("self" in settings)) settings.self = false
-                if (!("autoread" in settings)) settings.autoread = false
-                if (!("restrict" in settings)) settings.restrict = false
+                if (!("self" in settings)) settings.self = true
+                if (!("autoread" in settings)) settings.autoread = true
+                if (!("restrict" in settings)) settings.restrict = true
                 if (!("restartDB" in settings)) settings.restartDB = 0
                 if (!("status" in settings)) settings.status = 0
 
             } else global.db.data.settings[this.user.jid] = {
                 self: false,
-                autoread: false,
+                autoread: true,
                 restrict: false,
                 restartDB: 0,
                 status: 0
