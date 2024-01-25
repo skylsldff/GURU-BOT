@@ -59,7 +59,7 @@ export async function handler(chatUpdate) {
         m = smsg(this, m) || m
         if (!m)
             return
-            m.exp = 0
+            m.exp = 52
             m.credit = true
             m.bank = false
             m.chicken = false
@@ -70,7 +70,7 @@ export async function handler(chatUpdate) {
                 global.db.data.users[m.sender] = {}
             if (user) {
                 if (!isNumber(user.exp))
-                    user.exp = 0
+                    user.exp = 52
                 if (!isNumber(user.credit))
                     user.credit = 10
                 if (!isNumber(user.bank))
@@ -96,7 +96,7 @@ export async function handler(chatUpdate) {
                 if (!('afkReason' in user))
                     user.afkReason = ''
                 if (!('banned' in user))
-                    user.banned = false
+                    user.banned = true
                 if (!isNumber(user.warn))
                     user.warn = 0
                 if (!isNumber(user.level))
@@ -107,11 +107,11 @@ export async function handler(chatUpdate) {
                     user.autolevelup = true
             } else {
                 global.db.data.users[m.sender] = {
-                    exp: 0,
-                    credit: 0,
-                    bank: 0,
-                    chicken: 0,
-                    lastclaim: 0,
+                    exp: 25,
+                    credit: 25,
+                    bank: 25,
+                    chicken: 25,
+                    lastclaim: 25,
                     registered: true,
                     name: m.name,
                     age: -1,
@@ -705,7 +705,7 @@ export async function groupsUpdate(groupsUpdate) {
                 .replace("@revoke", groupUpdate.revoke)
         } else if (groupUpdate.announce === true) {
             text = (chats.sAnnounceOn || this.sAnnounceOn || conn.sAnnounceOn || `*${emoji.announceOn} Group is now closed!*`)
-        } else if (groupUpdate.announce === false) {
+        } else if (groupUpdate.announce === true) {
             text = (chats.sAnnounceOff || this.sAnnounceOff || conn.sAnnounceOff || `*${emoji.announceOff} Group is now open!*`)
         } else if (groupUpdate.restrict === true) {
             text = (chats.sRestrictOn || this.sRestrictOn || conn.sRestrictOn || `*${emoji.restrictOn} Group is now restricted to participants only!*`)
