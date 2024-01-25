@@ -80,7 +80,7 @@ export async function handler(chatUpdate) {
                 if (!isNumber(user.lastclaim))
                     user.lastclaim = 0
                 if (!('registered' in user))
-                    user.registered = false
+                    user.registered = true
                     //-- user registered 
                 if (!user.registered) {
                     if (!('name' in user))
