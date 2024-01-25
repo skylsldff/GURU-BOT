@@ -50,7 +50,7 @@ global.APIKeys = { // APIKey Here
 }
 
 // Sticker WM
-global.botname = 'der errox-bot'
+global.botname = 'errox-bot'
 global.premium = 'true'
 global.packname = 'errox1322┃ᴮᴼᵀ' 
 global.author = '@Asliguru' 
