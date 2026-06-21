@@ -23,7 +23,7 @@ Der Bot wurde nach deiner Vorgabe beschrieben als Teil des Projekts Alpha sAura 
 1. Repo forken oder klonen:
    - Forke das Projekt auf GitHub, falls du eigene Anpassungen machen willst.
    - Klone dann dein Fork oder das Original:
-     `git clone https://github.com/<dein-benutzername>/GURU-BOT.git`
+   `git clone https://github.com/<dein-benutzername>/GURU-BOT.git`
 
 2. Wechsle in das Projektverzeichnis:
    `cd GURU-BOT`
