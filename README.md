@@ -58,3 +58,11 @@ Der Bot wurde nach deiner Vorgabe beschrieben als Teil des Projekts Alpha sAura 
 - Der Bot akzeptiert nur Gruppenbeitritte über den privaten `/join`-Befehl.
 - Direkte Einladungen werden in der Regel abgelehnt oder führen dazu, dass der Bot die Gruppe verlässt.
 - Achte darauf, dass der Bot Admin-Rechte hat, wenn er Gruppenadministrationsbefehle ausführen soll.
+
+NUTZE NICHT DEINE NUMMER DEIN KONTO KÖNNTE DURCH WHATSAPP GESPERRT WERDEN 
+NUTZE EINE EINE FAKE WH NUMMER 
+
+ICH HAFTE FÜR NICHTS DIESES PROJEKT IST FREIWILLIG 
+JEDER USER AUF GITHUB KANN SEINE EIGEN SCHEIDUNGEN BETREFFEN 
+
+
