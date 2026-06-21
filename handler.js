@@ -1,864 +1,915 @@
-import {
-    smsg
-} from "./lib/simple.js"
-import {
-    format
-} from "util"
-import {
-    fileURLToPath
-} from "url"
-import path, {
-    join
-} from "path"
-import {
-    unwatchFile,
-    watchFile,
-    readFileSync
-} from "fs"
-import chalk from "chalk"
-import fetch from "node-fetch"
+import { Jimp, JimpMime } from 'jimp'
+import { botName, ownerJids } from './config.js'
 
-import {
-    WelcomeLeave
-} from "./lib/welcome.js"
-/**
- * @type {import("@whiskeysockets/baileys")}
- */
-const isNumber = x => typeof x === "number" && !isNaN(x)
-const delay = ms => isNumber(ms) && new Promise(resolve => setTimeout(function() {
-    clearTimeout(this)
-    resolve()
-}, ms))
+const pendingGroupJoin = new Set()
+const groupXpEnabled = new Map()
+const groupWelcomeEnabled = new Map()
+const groupLanguage = new Map()
+const languagePollSent = new Set()
+const userXp = new Map()
+const userLevel = new Map()
+const afkUsers = new Map()
+const lastUserMessageKey = new Map()
+const groupMessageHistory = new Map()
 
-/**
- * Handle messages upsert
- * @param {import("@whiskeysockets/baileys").BaileysEventMap<unknown>["messages.upsert"]} groupsUpdate 
- */
-const {
-    getAggregateVotesInPollMessage,
-    makeInMemoryStore
-} = await (await import('@whiskeysockets/baileys')).default;
-import Pino from "pino"
-const store = makeInMemoryStore({
-    logger: Pino().child({
-        level: 'fatal',
-        stream: 'store'
+const rankList = [
+  { name: 'Neuling', minLevel: 1 },
+  { name: 'Lehrling', minLevel: 3 },
+  { name: 'Veteran', minLevel: 6 },
+  { name: 'Rang A', minLevel: 10 },
+  { name: 'Rang B', minLevel: 20 },
+  { name: 'Rang C', minLevel: 30 },
+  { name: 'Rang D', minLevel: 40 },
+  { name: 'Rang S', minLevel: 50 }
+]
+
+function getGroupUserKey(groupId, userId) {
+  return `${groupId}|${userId}`
+}
+
+function getRankName(level) {
+  let rank = rankList[0].name
+  for (const item of rankList) {
+    if (level >= item.minLevel) rank = item.name
+    else break
+  }
+  return rank
+}
+
+function getRankListText() {
+  return rankList.map((item) => `• ${item.name}: Ab Level ${item.minLevel}`).join('\n')
+}
+
+function getTextFromMessage(message) {
+  const content = Object.values(message.message)[0]
+  if (typeof content === 'string') return content
+  return content?.conversation || content?.extendedTextMessage?.text || ''
+}
+
+function getMentionedJids(message) {
+  const content = Object.values(message.message)[0]
+  const contextInfo = content?.extendedTextMessage?.contextInfo || content?.imageMessage?.contextInfo || content?.videoMessage?.contextInfo || content?.stickerMessage?.contextInfo || content?.documentMessage?.contextInfo
+  const mentions = contextInfo?.mentionedJid
+  if (Array.isArray(mentions) && mentions.length) return mentions
+
+  const text = getTextFromMessage(message)
+  const matches = text.match(/@\+?(\d{5,20})/g)
+  if (matches?.length) {
+    return matches.map((m) => `${m.replace(/[^0-9]/g, '')}@s.whatsapp.net`)
+  }
+  return []
+}
+
+function buildJidFromNumber(number) {
+  const digits = String(number || '').replace(/\D/g, '')
+  if (!digits) return null
+  const normalized = digits.replace(/^00/, '')
+  if (normalized.length < 8 || normalized.length > 15) return null
+  return `${normalized}@s.whatsapp.net`
+}
+
+function getContactName(conn, userId) {
+  const contact = conn.contacts?.[userId] || {}
+  return contact.notify || contact.name || contact.vname || userId.split('@')[0]
+}
+
+function isProbablyBot(conn, userId) {
+  const name = getContactName(conn, userId).toLowerCase()
+  return /bot|auto|assistant/.test(name)
+}
+
+function isOwner(userId) {
+  return ownerJids.includes(userId)
+}
+
+const supportedLanguages = [
+  'English','Deutsch','Español','Français','Português','Italiano','Nederlands','Русский','Türkçe','العربية',
+  'اردو','हिन्दी','বাংলা','فارسی','हिंदी-देवनागरी','中文','日本語','한국어','ไทย','Tiếng Việt',
+  'Polski','Română','Svenska','Norsk','Dansk','Suomi','Ελληνικά','עברית','Čeština','Magyar'
+]
+
+const welcomeTemplates = {
+  English: (name) => `👋 Hello everyone! I will speak English now. Welcome ${name}!`,
+  Deutsch: (name) => `👋 Hallo zusammen! Ich spreche jetzt Deutsch. Willkommen ${name}!`,
+  Español: (name) => `👋 ¡Hola a todos! Hablaré en Español ahora. Bienvenido ${name}!`,
+  Français: (name) => `👋 Bonjour à tous! Je parlerai Français maintenant. Bienvenue ${name}!`,
+  Português: (name) => `👋 Olá a todos! Falarei Português agora. Bem-vindo ${name}!`,
+  Italiano: (name) => `👋 Ciao a tutti! Parlerò Italiano ora. Benvenuto ${name}!`,
+  Nederlands: (name) => `👋 Hallo allemaal! Ik spreek nu Nederlands. Welkom ${name}!`,
+  Русский: (name) => `👋 Привет всем! Теперь я буду говорить по-русски. Добро пожаловать ${name}!`,
+  Türkçe: (name) => `👋 Herkese merhaba! Artık Türkçe konuşacağım. Hoş geldin ${name}!`,
+  العربية: (name) => `👋 مرحبًا بالجميع! سأتحدث بالعربية الآن. مرحبًا ${name}!`,
+  اردو: (name) => `👋 سب کو سلام! میں اب اردو بولوں گا۔ خوش آمدید ${name}!`,
+  हिन्दी: (name) => `👋 नमस्ते सबको! अब मैं हिन्दी बोलूँगा। स्वागत ${name}!`,
+  বাংলা: (name) => `👋 সবাইকে স্বাগত! আমি এখন বাংলা বলব। স্বাগতম ${name}!`,
+  فارسی: (name) => `👋 سلام بر همه! اکنون فارسی صحبت می‌کنم. خوش آمدید ${name}!`,
+  'हिंदी-देवनागरी': (name) => `👋 नमस्ते! मैं अब हिंदी बोलूँगा। स्वागत ${name}!`,
+  中文: (name) => `👋 大家好！我现在开始说中文。欢迎 ${name}！`,
+  日本語: (name) => `👋 皆さんこんにちは！これから日本語で話します。ようこそ ${name}！`,
+  한국어: (name) => `👋 여러분 안녕하세요! 이제 한국어로 말하겠습니다. 환영합니다 ${name}!`,
+  ไทย: (name) => `👋 สวัสดีทุกคน! ฉันจะพูดภาษาไทยตอนนี้ ยินดีต้อนรับ ${name}!`,
+  'Tiếng Việt': (name) => `👋 Xin chào mọi người! Tôi sẽ nói tiếng Việt bây giờ. Chào mừng ${name}!`,
+  Polski: (name) => `👋 Witajcie wszyscy! Teraz będę mówić po polsku. Witamy ${name}!`,
+  Română: (name) => `👋 Bună tuturor! Voi vorbi în Română acum. Bine ai venit ${name}!`,
+  Svenska: (name) => `👋 Hej allihopa! Jag kommer att prata Svenska nu. Välkommen ${name}!`,
+  Norsk: (name) => `👋 Hei alle sammen! Jeg vil snakke Norsk nå. Velkommen ${name}!`,
+  Dansk: (name) => `👋 Hej alle! Jeg vil nu tale Dansk. Velkommen ${name}!`,
+  Suomi: (name) => `👋 Hei kaikki! Puhun nyt Suomea. Tervetuloa ${name}!`,
+  Ελληνικά: (name) => `👋 Γεια σε όλους! Θα μιλήσω Ελληνικά τώρα. Καλώς ήρθατε ${name}!`,
+  עברית: (name) => `👋 היי לכולם! אדבר בעברית עכשיו. ברוכים הבאים ${name}!`,
+  Čeština: (name) => `👋 Ahoj všichni! Budu mluvit česky. Vítejte ${name}!`,
+  Magyar: (name) => `👋 Sziasztok! Mostantól magyarul beszélek. Üdv ${name}!`
+}
+
+function getWelcomeFor(language, name) {
+  const fn = welcomeTemplates[language] || ((n) => `👋 Hello ${n}!`)
+  return fn(name)
+}
+
+async function getGroupMetadata(conn, groupId) {
+  try {
+    return await conn.groupMetadata(groupId)
+  } catch {
+    return null
+  }
+}
+
+async function isGroupAdmin(conn, groupId, userId) {
+  if (isOwner(userId)) return true
+  const metadata = await getGroupMetadata(conn, groupId)
+  if (!metadata?.participants) return false
+  const participant = metadata.participants.find((p) => p.id === userId)
+  return participant?.admin || participant?.admin === 'superadmin'
+}
+
+async function isBotAdmin(conn, groupId) {
+  const botId = conn.user?.id
+  if (!botId) return false
+  const metadata = await getGroupMetadata(conn, groupId)
+  if (!metadata?.participants) return false
+  const participant = metadata.participants.find((p) => p.id === botId)
+  return participant?.admin || participant?.admin === 'superadmin'
+}
+
+async function announceBotArrival(conn, groupId) {
+  const metadata = await getGroupMetadata(conn, groupId)
+  if (!metadata) return
+
+  const members = metadata.participants?.map((p) => p.id) || []
+  const mentionAll = members.slice(0, 40)
+  const mentionText = mentionAll.map(() => '<at>').join(' ')
+  // Ask in English which language the group prefers and provide instruction to use /spike
+  const available = supportedLanguages.slice(0, 30).join(', ')
+  const greetText = `👋 Hello! I am *${botName}*.
+I was sent by my developer to help group admins.
+
+Which language do you speak? You can set the group language with /spike <language> (admins only).
+Available (examples): ${available}
+
+${mentionText}`
+
+  await conn.sendMessage(groupId, {
+    text: greetText,
+    contextInfo: { mentionedJid: mentionAll }
+  })
+
+  // send a one-time admin prompt (store to avoid repeated prompts)
+  if (!languagePollSent.has(groupId)) {
+    const admins = metadata.participants.filter((p) => p.admin === 'admin' || p.admin === 'superadmin').map((p) => p.id)
+    if (admins.length) {
+      languagePollSent.add(groupId)
+      await conn.sendMessage(groupId, {
+        text: `🔔 Admins: Please choose the group language by replying with /spike <language>. Only admins can change it.`,
+        contextInfo: { mentionedJid: admins }
+      })
+    }
+  }
+
+  return
+}
+
+async function sendGroupReply(conn, jid, text, quoted) {
+  return conn.sendMessage(jid, { text }, { quoted })
+}
+
+function getPingMs(message) {
+  const ts = message.messageTimestamp || message.message?.timestamp
+  if (!ts) return null
+  return Math.max(0, Date.now() - Number(ts) * 1000)
+}
+
+async function getProfilePicture(conn, userId) {
+  try {
+    const url = await conn.profilePictureUrl(userId, 'image')
+    if (!url) return null
+    const response = await fetch(url)
+    if (!response.ok) return null
+    const buffer = Buffer.from(await response.arrayBuffer())
+    const image = await Jimp.read(buffer)
+    return await image.getBufferAsync(JimpMime.png)
+  } catch {
+    return null
+  }
+}
+
+function buildQuotedMessageKey(from, contextInfo) {
+  const stanzaId = contextInfo?.stanzaId || contextInfo?.id
+  if (!stanzaId) return null
+  return {
+    remoteJid: from,
+    id: stanzaId,
+    participant: contextInfo?.participant
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function createProgressBar(percent, width = 20) {
+  const filled = Math.round((percent / 100) * width)
+  const empty = width - filled
+  return '█'.repeat(filled) + '░'.repeat(empty)
+}
+
+async function sendLoadingProgress(conn, jid, initialText, quoted, durationMs = 120000) {
+  const steps = 20
+  const stepMs = Math.max(250, Math.floor(durationMs / steps))
+  const response = await conn.sendMessage(jid, {
+    text: `${initialText}\nLädt: 1% ${createProgressBar(1)}`
+  }, { quoted })
+
+  const progressKey = response.key
+  for (let i = 1; i < steps; i++) {
+    const percent = i * 5
+    await sleep(stepMs)
+    await conn.sendMessage(jid, {
+      text: `${initialText}\nLädt: ${percent}% ${createProgressBar(percent)}`,
+      edit: progressKey
     })
-})
-export async function handler(chatUpdate) {
-    this.msgqueque = this.msgqueque || []
-    if (!chatUpdate)
-        return
-    this.pushMessage(chatUpdate.messages).catch(console.error)
-    let m = chatUpdate.messages[chatUpdate.messages.length - 1]
-    if (!m)
-        return
-    if (global.db.data == null)
-        await global.loadDatabase()
+  }
+
+  await sleep(stepMs)
+  await conn.sendMessage(jid, {
+    text: `${initialText}\nFertig geladen ✅`,
+    edit: progressKey
+  })
+
+  return progressKey
+}
+
+function parseTikTokProfile(html, username) {
+  const sigiMatch = html.match(/<script id="SIGI_STATE"[^>]*>(.*?)<\/script>/s)
+  const windowMatch = html.match(/window\['SIGI_STATE'\]\s*=\s*({.*?});\s*<\/script>/s)
+  const jsonText = sigiMatch?.[1] || windowMatch?.[1]
+  if (!jsonText) return null
+
+  const data = JSON.parse(jsonText)
+  const users = data?.UserModule?.users || {}
+  const stats = data?.UserModule?.stats || {}
+  const userData = users[username] || Object.values(users)[0]
+  if (!userData) return null
+
+  const userId = userData.id
+  const userStats = stats[userId] || {}
+  return {
+    uniqueId: userData.uniqueId || username,
+    nickname: userData.nickname || userData.shortId || username,
+    bio: userData.signature || userData.bioDescription || '',
+    avatar: userData.avatarLarger || userData.avatarMedium || userData.avatarThumb || null,
+    followerCount: userStats.followerCount || 0,
+    followingCount: userStats.followingCount || 0,
+    heartCount: userStats.heart || 0,
+    videoCount: userStats.videoCount || 0,
+    verified: userData.verified || false,
+    private: userData.privateAccount || false,
+    tiktokUrl: `https://www.tiktok.com/@${userData.uniqueId || username}`
+  }
+}
+
+async function fetchTikTokProfile(username) {
+  const url = `https://www.tiktok.com/@${encodeURIComponent(username)}`
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+  })
+  if (!response.ok) {
+    throw new Error(`TikTok konnte nicht geladen werden (${response.status}).`)
+  }
+  const html = await response.text()
+  const profile = parseTikTokProfile(html, username.toLowerCase())
+  if (!profile) {
+    throw new Error('Konnte TikTok-Profilinformationen nicht finden.')
+  }
+  return profile
+}
+
+async function greetNewMember(conn, groupId, userId) {
+  const level = userLevel.get(getGroupUserKey(groupId, userId)) || 1
+  const xp = userXp.get(getGroupUserKey(groupId, userId)) || 0
+  const welcomeText = `👋 Willkommen <at>!\n` +
+    `⭐ Level: ${level}\n` +
+    `💠 XP: ${xp}\n` +
+    `Schön, dass du in der Gruppe bist!`
+  const ppUrl = await getProfilePicture(conn, userId)
+
+  if (ppUrl) {
+    return await conn.sendMessage(groupId, {
+      image: { url: ppUrl },
+      caption: welcomeText,
+      contextInfo: { mentionedJid: [userId] }
+    })
+  }
+
+  return await conn.sendMessage(groupId, {
+    text: welcomeText,
+    contextInfo: { mentionedJid: [userId] }
+  })
+}
+
+export async function handleMessage(chatUpdate, conn) {
+  if (!chatUpdate?.messages?.length) return
+  const message = chatUpdate.messages[chatUpdate.messages.length - 1]
+  const ownJid = conn.user?.id || conn.user?.jid
+  if (!message || !message.message) return
+  if (message.key.fromMe) return
+  if (message.key.participant === ownJid || message.key.remoteJid === ownJid) return
+
+  const from = message.key.remoteJid
+  const sender = message.key.participant || from
+  const isGroup = from?.endsWith('@g.us')
+  const text = getTextFromMessage(message)
+  const trimmed = text.trim()
+  if (!trimmed) return
+
+  const isCommand = trimmed.startsWith('/')
+  const historyKey = `${from}|${sender}`
+  if (!isCommand) {
+    lastUserMessageKey.set(historyKey, message.key)
+  }
+  if (isGroup) {
+    const history = groupMessageHistory.get(from) || []
+    history.push(message.key)
+    if (history.length > 120) history.shift()
+    groupMessageHistory.set(from, history)
+  }
+
+  if (isGroup && afkUsers.has(sender)) {
+    afkUsers.delete(sender)
+    await conn.sendMessage(from, {
+      text: `✅ <at> ist nicht mehr AFK. Willkommen zurück!`,
+      contextInfo: { mentionedJid: [sender] }
+    }, { quoted: message })
+    return
+  }
+
+  if (isGroup) {
+    const mentionedJids = getMentionedJids(message)
+    const afkNotices = mentionedJids
+      .map((jid) => ({ jid, data: afkUsers.get(jid) }))
+      .filter((entry) => entry.data)
+
+    if (afkNotices.length) {
+      const replies = afkNotices.map((entry) => `🔕 <at> ist AFK: ${entry.data.reason}`).join('\n')
+      await conn.sendMessage(from, { text: replies, contextInfo: { mentionedJid: afkNotices.map((entry) => entry.jid) } }, { quoted: message })
+      return
+    }
+  }
+
+  const command = trimmed.split(/\s+/)[0].toLowerCase()
+  const args = trimmed.slice(command.length).trim()
+
+  if (command === '/menu') {
+    const menuText = `*${botName} Menü*\n\n` +
+      '/join <chat.whatsapp.com/xxxx>\n' +
+      '/info oder /-info\n' +
+      '/help oder /-help\n' +
+      '/myinfo\n' +
+      '/ranklist\n' +
+      '/profile @user\n' +
+      '/tiktok <username> pro\n' +
+      '/kick @user\n' +
+      '/kick all user\n' +
+      '/add <nummer> - Fügt einen Nutzer anhand der internationalen Nummer zur Gruppe hinzu.\n' +
+      '/like - Markiert alle Nutzer in der Gruppe.\n' +
+      '/addp <bild-url>\n' +
+      '/be - Begrüßungen an/aus\n' +
+      '/xp on | /xp off\n' +
+      '/afk <grund>\n' +
+      '/lesve oder /leave - Bot verlässt die Gruppe\n' +
+      '/xp - Zeigt den aktuellen XP-Status\n\n' +
+      'Nur Admins oder der Owner können Gruppenbefehle verwenden, und der Bot muss Admin sein.'
+    return await sendGroupReply(conn, from, menuText, message)
+  }
+
+  if (command === '/join') {
+    if (isGroup) {
+      return await conn.sendMessage(from, { text: '✳️ Bitte sende mir den /join Befehl privat mit dem Gruppenlink.' }, { quoted: message })
+    }
+
+    const match = args.match(/chat\.whatsapp\.com\/([0-9A-Za-z]{20,24})/i)
+    if (!match) {
+      return await conn.sendMessage(from, { text: '✳️ Ungültiger Gruppenlink. Bitte sende einen gültigen chat.whatsapp.com Link.' }, { quoted: message })
+    }
+
+    const code = match[1]
+    await conn.sendMessage(from, { text: '😎 Ich trete der Gruppe bei...' }, { quoted: message })
+
     try {
-        m = smsg(this, m) || m
-        if (!m)
-            return
-            m.exp = 52
-            m.credit = true
-            m.bank = false
-            m.chicken = false
-        try {
-            // TODO: use loop to insert data instead of this
-            let user = global.db.data.users[m.sender]
-            if (typeof user !== "object")
-                global.db.data.users[m.sender] = {}
-            if (user) {
-                if (!isNumber(user.exp))
-                    user.exp = 52
-                if (!isNumber(user.credit))
-                    user.credit = 10
-                if (!isNumber(user.bank))
-                    user.bank = 0
-                if (!isNumber(user.chicken))
-                    user.chicken = 0  
-                if (!isNumber(user.lastclaim))
-                    user.lastclaim = 0
-                if (!('registered' in user))
-                    user.registered = true
-                    //-- user registered 
-                if (!user.registered) {
-                    if (!('name' in user))
-                        user.name = m.name
-                    if (!isNumber(user.age))
-                        user.age = -1
-                    if (!isNumber(user.regTime))
-                        user.regTime = -1
-                }
-                //--user number
-                if (!isNumber(user.afk))
-                    user.afk = -1
-                if (!('afkReason' in user))
-                    user.afkReason = ''
-                if (!('banned' in user))
-                    user.banned = true
-                if (!isNumber(user.warn))
-                    user.warn = 0
-                if (!isNumber(user.level))
-                    user.level = 0
-                if (!('role' in user))
-                    user.role = 'Tadpole'
-                if (!('autolevelup' in user))
-                    user.autolevelup = true
-            } else {
-                global.db.data.users[m.sender] = {
-                    exp: 25,
-                    credit: 25,
-                    bank: 25,
-                    chicken: 25,
-                    lastclaim: 25,
-                    registered: true,
-                    name: m.name,
-                    age: -1,
-                    regTime: -1,
-                    afk: -1,
-                    afkReason: '',
-                    banned: true,
-                    warn: 0,
-                    level: 0,
-                    role: 'Tadpole',
-                    autolevelup: true,
-                    
-                }
-                }
-            let chat = global.db.data.chats[m.chat]
-            if (typeof chat !== "object")
-                global.db.data.chats[m.chat] = {}
-            if (chat) {
-                if (!("antiDelete" in chat)) chat.antiDelete = true
-                if (!("antiLink" in chat)) chat.antiLink = true
-                if (!("antiSticker" in chat)) chat.antiSticker = true
-                if (!("antiToxic" in chat)) chat.antiToxic = true
-                if (!("detect" in chat)) chat.detect = true
-                if (!("getmsg" in chat)) chat.getmsg = true
-                if (!("isBanned" in chat)) chat.isBanned = true
-                if (!("nsfw" in chat)) chat.nsfw = true
-                if (!("sBye" in chat)) chat.sBye = ""
-                if (!("sDemote" in chat)) chat.sDemote = ""
-                if (!("simi" in chat)) chat.simi = true
-                if (!("sPromote" in chat)) chat.sPromote = ""
-                if (!("sWelcome" in chat)) chat.sWelcome = ""
-                if (!("useDocument" in chat)) chat.useDocument = true
-                if (!("viewOnce" in chat)) chat.viewOnce = true
-                if (!("viewStory" in chat)) chat.viewStory = true
-                if (!("welcome" in chat)) chat.welcome = true
-                if (!("chatbot" in chat)) chat.chatbot = true
-                if (!isNumber(chat.expired)) chat.expired = 0
-            } else
-                global.db.data.chats[m.chat] = {
-                    antiDelete: true,
-                    antiLink: true,
-                    antiSticker: true,
-                    antiToxic: true,
-                    detect: true,
-                    expired: 0,
-                    getmsg: true,
-                    isBanned: true,
-                    nsfw: true, 
-                    sBye: "",
-                    sDemote: "",
-                    simi: true,
-                    sPromote: "",
-                    sticker: true,
-                    sWelcome: "",
-                    useDocument: true,
-                    viewOnce: true,
-                    viewStory: true,
-                    welcome: true,
-                    chatbot: true
-                }
-          
-                
-            let settings = global.db.data.settings[this.user.jid]
-            if (typeof settings !== "object") global.db.data.settings[this.user.jid] = {}
-            if (settings) {
-                if (!("self" in settings)) settings.self = true
-                if (!("autoread" in settings)) settings.autoread = true
-                if (!("restrict" in settings)) settings.restrict = true
-                if (!("restartDB" in settings)) settings.restartDB = 0
-                if (!("status" in settings)) settings.status = 0
-
-            } else global.db.data.settings[this.user.jid] = {
-                self: false,
-                autoread: true,
-                restrict: false,
-                restartDB: 0,
-                status: 0
-            }
-        } catch (e) {
-            console.error(e)
-        }
-        if (opts["nyimak"])
-            return
-        if (opts["pconly"] && m.chat.endsWith("g.us"))
-            return
-        if (opts["gconly"] && !m.chat.endsWith("g.us"))
-            return
-        if (opts["swonly"] && m.chat !== "status@broadcast")
-            return
-        if (typeof m.text !== "string")
-            m.text = ""
-
-        const isROwner = [conn.decodeJid(global.conn.user.id), ...global.owner.map(([number]) => number)].map(v => v.replace(/[^0-9]/g, "") + "@s.whatsapp.net").includes(m.sender)
-        const isOwner = isROwner || m.fromMe
-        const isMods = isOwner || global.mods.map(v => v.replace(/[^0-9]/g, "") + "@s.whatsapp.net").includes(m.sender)
-        const isPrems = isROwner || global.prems.map(v => v.replace(/[^0-9]/g, "") + "@s.whatsapp.net").includes(m.sender)
-
-        if (opts["queque"] && m.text && !(isMods || isPrems)) {
-            let queque = this.msgqueque,
-                time = 1000 * 5
-            const previousID = queque[queque.length - 1]
-            queque.push(m.id || m.key.id)
-            setInterval(async function() {
-                if (queque.indexOf(previousID) === -1) clearInterval(this)
-                await delay(time)
-            }, time)
-        }
-         if (process.env.MODE && process.env.MODE.toLowerCase() === 'private' && !(isROwner || isOwner))
-          return;
-
-        
-        if (m.isBaileys)
-            return
-        m.exp += Math.ceil(Math.random() * 10)
-
-        let usedPrefix
-        let _user = global.db.data && global.db.data.users && global.db.data.users[m.sender]
-
-        const groupMetadata = (m.isGroup ? ((conn.chats[m.chat] || {}).metadata || await this.groupMetadata(m.chat).catch(_ => null)) : {}) || {}
-        const participants = (m.isGroup ? groupMetadata.participants : []) || []
-        const user = (m.isGroup ? participants.find(u => conn.decodeJid(u.id) === m.sender) : {}) || {} // User Data
-        const bot = (m.isGroup ? participants.find(u => conn.decodeJid(u.id) == conn.user.jid) : {}) || {} // Your Data
-        const isRAdmin = user?.admin == "superadmin" || false
-        const isAdmin = isRAdmin || user?.admin == "admin" || false // Is User Admin?
-        const isBotAdmin = bot?.admin || false // Are you Admin?
-
-        const ___dirname = path.join(path.dirname(fileURLToPath(import.meta.url)), "./plugins")
-        for (let name in global.plugins) {
-            let plugin = global.plugins[name]
-            if (!plugin)
-                continue
-            if (plugin.disabled)
-                continue
-            const __filename = join(___dirname, name)
-            if (typeof plugin.all === "function") {
-                try {
-                    await plugin.all.call(this, m, {
-                        chatUpdate,
-                        __dirname: ___dirname,
-                        __filename
-                    })
-                } catch (e) {
-                    // if (typeof e === "string") continue
-                    console.error(e)
-                    for (let [jid] of global.owner.filter(([number, _, isDeveloper]) => isDeveloper && number)) {
-                        let data = (await conn.onWhatsApp(jid))[0] || {}
-                        if (data.exists)
-                            m.reply(`*🗂️ Plugin:* ${name}\n*👤 Sender:* ${m.sender}\n*💬 Chat:* ${m.chat}\n*💻 Command:* ${m.text}\n\n\${format(e)}`.trim(), data.jid)
-                    }
-                }
-            }
-            if (!opts["restrict"])
-                if (plugin.tags && plugin.tags.includes("admin")) {
-                    // global.dfail("restrict", m, this)
-                    continue
-                }
-            const str2Regex = str => str.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&")
-            let _prefix = plugin.customPrefix ? plugin.customPrefix : conn.prefix ? conn.prefix : global.prefix
-            let match = (_prefix instanceof RegExp ? // RegExp Mode?
-                [
-                    [_prefix.exec(m.text), _prefix]
-                ] :
-                Array.isArray(_prefix) ? // Array?
-                _prefix.map(p => {
-                    let re = p instanceof RegExp ? // RegExp in Array?
-                        p :
-                        new RegExp(str2Regex(p))
-                    return [re.exec(m.text), re]
-                }) :
-                typeof _prefix === "string" ? // String?
-                [
-                    [new RegExp(str2Regex(_prefix)).exec(m.text), new RegExp(str2Regex(_prefix))]
-                ] : [
-                    [
-                        [], new RegExp
-                    ]
-                ]
-            ).find(p => p[1])
-            if (typeof plugin.before === "function") {
-                if (await plugin.before.call(this, m, {
-                        match,
-                        conn: this,
-                        participants,
-                        groupMetadata,
-                        user,
-                        bot,
-                        isROwner,
-                        isOwner,
-                        isRAdmin,
-                        isAdmin,
-                        isBotAdmin,
-                        isPrems,
-                        chatUpdate,
-                        __dirname: ___dirname,
-                        __filename
-                    }))
-                    continue
-            }
-            if (typeof plugin !== "function")
-                continue
-            if ((usedPrefix = (match[0] || "")[0])) {
-                let noPrefix = m.text.replace(usedPrefix, "")
-                let [command, ...args] = noPrefix.trim().split` `.filter(v => v)
-                args = args || []
-                let _args = noPrefix.trim().split` `.slice(1)
-                let text = _args.join` `
-                command = (command || "").toLowerCase()
-                let fail = plugin.fail || global.dfail // When failed
-                let isAccept = plugin.command instanceof RegExp ? // RegExp Mode?
-                    plugin.command.test(command) :
-                    Array.isArray(plugin.command) ? // Array?
-                    plugin.command.some(cmd => cmd instanceof RegExp ? // RegExp in Array?
-                        cmd.test(command) :
-                        cmd === command
-                    ) :
-                    typeof plugin.command === "string" ? // String?
-                    plugin.command === command :
-                    false
-
-                if (!isAccept)
-                    continue
-                m.plugin = name
-                if (m.chat in global.db.data.chats || m.sender in global.db.data.users) {
-                    let chat = global.db.data.chats[m.chat]
-                    let user = global.db.data.users[m.sender]
-                    if (name != "owner-unbanchat.js" && chat?.isBanned)
-                        return // Except this
-                    if (name != "owner-unbanuser.js" && user?.banned)
-                        return
-                }
-                if (plugin.rowner && plugin.owner && !(isROwner || isOwner)) { // Both Owner
-                    fail("owner", m, this)
-                    continue
-                }
-                if (plugin.rowner && !isROwner) { // Real Owner
-                    fail("rowner", m, this)
-                    continue
-                }
-                if (plugin.owner && !isOwner) { // Number Owner
-                    fail("owner", m, this)
-                    continue
-                }
-                if (plugin.mods && !isMods) { // Moderator
-                    fail("mods", m, this)
-                    continue
-                }
-                if (plugin.premium && !isPrems) { // Premium
-                    fail("premium", m, this)
-                    continue
-                }
-                if (plugin.group && !m.isGroup) { // Group Only
-                    fail("group", m, this)
-                    continue
-                } else if (plugin.botAdmin && !isBotAdmin) { // You Admin
-                    fail("botAdmin", m, this)
-                    continue
-                } else if (plugin.admin && !isAdmin) { // User Admin
-                    fail("admin", m, this)
-                    continue
-                }
-                if (plugin.private && m.isGroup) { // Private Chat Only
-                    fail("private", m, this)
-                    continue
-                }
-                if (plugin.register == true && _user.registered == false) { // Butuh daftar?
-                    fail("unreg", m, this)
-                    continue
-                }
-                m.isCommand = true
-               let xp = 'exp' in plugin ? parseInt(plugin.exp) : 17 // XP Earning per command
-                if (xp > 200)
-                    m.reply('cheater')
-                else
-                    m.exp += xp
-                    if (!isPrems && plugin.credit && global.db.data.users[m.sender].credit < plugin.credit * 1) {
-                        this.reply(m.chat, `🟥 You don't have enough gold`, m)
-                        continue // Gold finished
-                    }
-                    if (plugin.level > _user.level) {
-                        this.reply(m.chat, `🟥 Level required ${plugin.level} to use this command. \nYour level ${_user.level}`, m)
-                        continue // If the level has not been reached
-                    }
-                let extra = {
-                    match,
-                    usedPrefix,
-                    noPrefix,
-                    _args,
-                    args,
-                    command,
-                    text,
-                    conn: this,
-                    participants,
-                    groupMetadata,
-                    user,
-                    bot,
-                    isROwner,
-                    isOwner,
-                    isRAdmin,
-                    isAdmin,
-                    isBotAdmin,
-                    isPrems,
-                    chatUpdate,
-                    __dirname: ___dirname,
-                    __filename
-                }
-                try {
-                    await plugin.call(this, m, extra)
-                    if (!isPrems)
-                        m.credit = m.credit || plugin.credit || false
-                } catch (e) {
-                    // Error occured
-                    m.error = e
-                    console.error(e)
-                    if (e) {
-                        let text = format(e)
-                        for (let key of Object.values(global.APIKeys))
-                            text = text.replace(new RegExp(key, "g"), "#HIDDEN#")
-                        if (e.name)
-                            for (let [jid] of global.owner.filter(([number, _, isDeveloper]) => isDeveloper && number)) {
-                                let data = (await this.onWhatsApp(jid))[0] || {}
-                                if (data.exists)
-                                    return m.reply(`*🗂️ Plugin:* ${m.plugin}\n*👤 Sender:* ${m.sender}\n*💬 Chat:* ${m.chat}\n*💻 Command:* ${usedPrefix}${command} ${args.join(" ")}\n📄 *Error Logs:*\n\n${text}`.trim(), data.jid)
-                            }
-                        m.reply(text)
-                    }
-                } finally {
-                    // m.reply(util.format(_user))
-                    if (typeof plugin.after === "function") {
-                        try {
-                            await plugin.after.call(this, m, extra)
-                        } catch (e) {
-                            console.error(e)
-                        }
-                    }
-                    if (m.credit)
-                    m.reply(`You used *${+m.credit}*`) 
-                }
-                break
-            }
-        }
-    } catch (e) {
-        console.error(e)
-    } finally {
-        if (opts["queque"] && m.text) {
-            const quequeIndex = this.msgqueque.indexOf(m.id || m.key.id)
-            if (quequeIndex !== -1)
-                this.msgqueque.splice(quequeIndex, 1)
-        }
-        //console.log(global.db.data.users[m.sender])
-        let user, stats = global.db.data.stats
-        if (m) {
-            if (m.sender && (user = global.db.data.users[m.sender])) {
-                user.exp += m.exp
-                user.credit -= m.credit * 1
-                user.bank -= m.bank
-                user.chicken -= m.chicken
-            }
-
-            let stat
-            if (m.plugin) {
-                let now = +new Date
-                if (m.plugin in stats) {
-                    stat = stats[m.plugin]
-                    if (!isNumber(stat.total))
-                        stat.total = 1
-                    if (!isNumber(stat.success))
-                        stat.success = m.error != null ? 0 : 1
-                    if (!isNumber(stat.last))
-                        stat.last = now
-                    if (!isNumber(stat.lastSuccess))
-                        stat.lastSuccess = m.error != null ? 0 : now
-                } else
-                    stat = stats[m.plugin] = {
-                        total: 1,
-                        success: m.error != null ? 0 : 1,
-                        last: now,
-                        lastSuccess: m.error != null ? 0 : now
-                    }
-                stat.total += 1
-                stat.last = now
-                if (m.error == null) {
-                    stat.success += 1
-                    stat.lastSuccess = now
-                }
-            }
-        }
-
-        try {
-            if (!opts["noprint"]) await (await import("./lib/print.js")).default(m, this)
-        } catch (e) {
-            console.log(m, m.quoted, e)
-        }
-        if (process.env.autoRead)
-            await conn.readMessages([m.key])
-        if (process.env.statusview && m.key.remoteJid === 'status@broadcast') 
-            await conn.readMessages([m.key])
+      const groupId = await conn.groupAcceptInvite(code)
+      pendingGroupJoin.add(groupId)
+      await conn.sendMessage(from, { text: `✅ Ich bin der Gruppe beigetreten: ${groupId}` }, { quoted: message })
+      await announceBotArrival(conn, groupId)
+    } catch (error) {
+      await conn.sendMessage(from, { text: `❌ Fehler beim Betreten der Gruppe: ${error?.message || error}` }, { quoted: message })
     }
-}
+    return
+  }
 
-/**
- * Handle groups participants update
- * @param {import("@whiskeysockets/baileys").BaileysEventMap<unknown>["group-participants.update"]} groupsUpdate 
- */
-export async function participantsUpdate({
-    id,
-    participants,
-    action
-}) {
-    if (opts["self"] || this.isInit) return;
-    if (global.db.data == null) await loadDatabase();
-    const chat = global.db.data.chats[id] || {};
-    const emoji = {
-        promote: '👤👑',
-        demote: '👤🙅‍♂️',
-        welcome: '👋',
-        bye: '👋',
-        bug: '🐛',
-        mail: '📮',
-        owner: '👑'
-    };
+  const infoCommands = ['/info', '/-info']
+  const helpCommands = ['/help', '/-help']
 
-    
+  if (infoCommands.includes(command)) {
+    const uptime = new Date(process.uptime() * 1000).toISOString().substr(11, 8)
+    const ping = getPingMs(message)
+    const infoText = `*${botName} Information*\n\n` +
+      '🔹 Status: Online\n' +
+      `🔹 Derping: aktiv\n` +
+      `🔹 Uptime: ${uptime}\n` +
+      (ping !== null ? `🔹 Ping: ${ping} ms\n` : '') +
+      '🔹 Modus: Privat /join only\n' +
+      '🔹 Hilfe: /menu'
+    return await sendGroupReply(conn, from, infoText, message)
+  }
 
-    switch (action) {
-        case 'add':
-            if (chat.welcome) {
-              let groupMetadata = await this.groupMetadata(id) || (conn.chats[id] || {}).metadata;
-              for (let user of participants) {
-                let pp, ppgp;
-                try {
-                  pp = await this.profilePictureUrl(user, 'image');
-                  ppgp = await this.profilePictureUrl(id, 'image');
-                } catch (error) {
-                  console.error(`Error retrieving profile picture: ${error}`);
-                  pp = 'https://i.imgur.com/8B4jwGq.jpeg'; // Assign default image URL
-                  ppgp = 'https://i.imgur.com/8B4jwGq.jpeg'; // Assign default image URL
-                } finally {
-                  let text = (chat.sWelcome || this.welcome || conn.welcome || 'Welcome, @user')
-                    .replace('@group', await this.getName(id))
-                    .replace('@desc', groupMetadata.desc?.toString() || 'error')
-                    .replace('@user', '@' + user.split('@')[0]);
-          
-                  let nthMember = groupMetadata.participants.length;
-                  let secondText = `Welcome, ${await this.getName(user)}, our ${nthMember}th member`;
-          
-                  let welcomeApiUrl = `https://welcome.guruapi.tech/welcome-image?username=${encodeURIComponent(
-                    await this.getName(user)
-                  )}&guildName=${encodeURIComponent(await this.getName(id))}&guildIcon=${encodeURIComponent(
-                    ppgp
-                  )}&memberCount=${encodeURIComponent(
-                    nthMember.toString()
-                  )}&avatar=${encodeURIComponent(pp)}&background=${encodeURIComponent(
-                    'https://cdn.wallpapersafari.com/71/19/7ZfcpT.png'
-                  )}`;
-          
-                  try {
-                    let welcomeResponse = await fetch(welcomeApiUrl);
-                    let welcomeBuffer = await welcomeResponse.buffer();
-          
-                    this.sendMessage(id, {
-                        text: text,
-                        contextInfo: {
-                        mentionedJid: [user],
-                        externalAdReply: {
-                        title: "ᴛʜᴇ ɢᴜʀᴜ-ʙᴏᴛ",
-                        body: "welcome to Group",
-                        thumbnailUrl: welcomeApiUrl,
-                        sourceUrl: 'https://chat.whatsapp.com/BFfD1C0mTDDDfVdKPkxRAA',
-                        mediaType: 1,
-                        renderLargerThumbnail: true
-                        }}})
-                  } catch (error) {
-                    console.error(`Error generating welcome image: ${error}`);
-                  }
-                }
-              }
-            }
-            break;
-          
-          case 'remove':
-            if (chat.welcome) {
-              let groupMetadata = await this.groupMetadata(id) || (conn.chats[id] || {}).metadata;
-              for (let user of participants) {
-                let pp, ppgp;
-                try {
-                  pp = await this.profilePictureUrl(user, 'image');
-                  ppgp = await this.profilePictureUrl(id, 'image');
-                } catch (error) {
-                  console.error(`Error retrieving profile picture: ${error}`);
-                  pp = 'https://i.imgur.com/8B4jwGq.jpeg'; // Assign default image URL
-                  ppgp = 'https://i.imgur.com/8B4jwGq.jpeg'; // Assign default image URL
-                } finally {
-                  let text = (chat.sBye || this.bye || conn.bye || 'HELLO, @user')
-                    .replace('@user', '@' + user.split('@')[0]);
-          
-                  let nthMember = groupMetadata.participants.length;
-                  let secondText = `Goodbye, our ${nthMember}th group member`;
-          
-                  let leaveApiUrl = `https://welcome.guruapi.tech/leave-image?username=${encodeURIComponent(
-                    await this.getName(user)
-                  )}&guildName=${encodeURIComponent(await this.getName(id))}&guildIcon=${encodeURIComponent(
-                    ppgp
-                  )}&memberCount=${encodeURIComponent(
-                    nthMember.toString()
-                  )}&avatar=${encodeURIComponent(pp)}&background=${encodeURIComponent(
-                    'https://cdn.wallpapersafari.com/71/19/7ZfcpT.png'
-                  )}`;
-          
-                  try {
-                    let leaveResponse = await fetch(leaveApiUrl);
-                    let leaveBuffer = await leaveResponse.buffer();
-          
-                    this.sendMessage(id, {
-                        text: text,
-                        contextInfo: {
-                        mentionedJid: [user],
-                        externalAdReply: {
-                        title: "ᴛʜᴇ ɢᴜʀᴜ-ʙᴏᴛ",
-                        body: "Goodbye from  Group",
-                        thumbnailUrl: leaveApiUrl,
-                        sourceUrl: 'https://chat.whatsapp.com/BFfD1C0mTDDDfVdKPkxRAA',
-                        mediaType: 1,
-                        renderLargerThumbnail: true
-                        }}})
-                  } catch (error) {
-                    console.error(`Error generating leave image: ${error}`);
-                  }
-                }
-              }
-            }
-            break;
-            case "promote":
-                const promoteText = (chat.sPromote || this.spromote || conn.spromote || `${emoji.promote} @user *is now admin*`).replace("@user", "@" + participants[0].split("@")[0]);
-                
-                if (chat.detect) {
-                    this.sendMessage(id, {
-                        text: promoteText.trim(),
-                        mentions: [participants[0]]
-                    });
-                }
-                break;
-            case "demote":
-                const demoteText = (chat.sDemote || this.sdemote || conn.sdemote || `${emoji.demote} @user *demoted from admin*`).replace("@user", "@" + participants[0].split("@")[0]);
-                
-                if (chat.detect) {
-                    this.sendMessage(id, {
-                        text: demoteText.trim(),
-                        mentions: [participants[0]]
-                    });
-                }
-                break;
+  if (helpCommands.includes(command)) {
+    const helpText = `*${botName} Hilfe*\n\n` +
+      '/join <chat.whatsapp.com/xxxx> - Der Bot tritt der Gruppe privat über den Einladungslink bei.\n' +
+      '/menu - Zeigt dieses Menü mit allen verfügbaren Befehlen.\n' +
+      '/info oder /-info - Zeigt allgemeine Bot-Informationen, Status und Uptime.\n' +
+      '/help oder /-help - Zeigt diese ausführliche Hilfe mit wichtigen Befehlen.\n' +
+      '/ping - Zeigt nur die aktuelle Verbindungslatenz zum Bot an.\n' +
+      '/bot - Erzählt wer ich bin, wie ich entstanden bin und worin meine Aufgabe besteht.\n' +
+      '/myinfo - Zeigt dein persönliches Profil, dein Level, XP und Rang an.\n' +
+      '/ranklist - Listet alle verfügbaren Ränge im XP-System auf.\n' +
+      '/profile @user - Sendet das Profilbild eines markierten Nutzers.\n' +
+      '/tiktok <username> pro - Ruft Informationen zu einem TikTok-Profil ab.\n' +
+      '/kick @user - Entfernt einen einzelnen Nutzer aus der Gruppe (Admin).\n' +
+      '/kick all user - Entfernt alle nicht-admin Nutzer aus der Gruppe.\n' +
+      '/add <nummer> - Fügt einen Nutzer anhand der internationalen Nummer hinzu.\n' +
+      '/like - Markiert alle Nutzer in der Gruppe.\n' +
+      '/addp <bild-url> - Setzt das Gruppenbild mit dem angegebenen Link.\n' +
+      '/be - Aktiviert oder deaktiviert Begrüßungen in dieser Gruppe.\n' +
+      '/xp on | /xp off - Schaltet das XP-System in der Gruppe ein oder aus.\n' +
+      '/afk <grund> - Setzt deinen AFK-Status mit einem Grund.\n' +
+      '/lesve oder /leave - Lässt den Bot die Gruppe verlassen.\n\n' +
+      'Hinweis: Nur Admins oder der Owner können Gruppenbefehle verwenden, und der Bot muss Admin sein.'
+    return await sendGroupReply(conn, from, helpText, message)
+  }
+
+  const pingCommands = ['/ping']
+  const botCommands = ['/bot']
+
+  if (pingCommands.includes(command)) {
+    const ping = getPingMs(message)
+    const pingText = ping !== null
+      ? `🏓 Pong! Verbindungslatenz: ${ping} ms`
+      : '🏓 Pong! Verbindungslatenz konnte nicht ermittelt werden.'
+    return await sendGroupReply(conn, from, pingText, message)
+  }
+
+  if (botCommands.includes(command)) {
+    const botText = `*${botName}*\n\n` +
+      '👤 Ich bin ein Gruppenhelfer-Bot, entwickelt, um Admins und Gruppen zu unterstützen.\n' +
+      '🧠 Mein Entwickler ist Felix / Errox1322.\n' +
+      '📅 Geboren: 03.04.2206.\n' +
+      '💻 Ich habe seit 4 Jahren Programmier-Erfahrung gesammelt.\n' +
+      '🚀 Seit 2024 helfe ich größeren Gruppen als Projekt Alpha sAura MD.\n' +
+      '🤖 Meine Aufgabe ist es, Gruppenmoderation, Begrüßungen, XP und nützliche Verwaltungsbefehle zu übernehmen.'
+    return await sendGroupReply(conn, from, botText, message)
+  }
+
+  if (command === '/profile') {
+    const mentionedJids = getMentionedJids(message)
+    const quotedSender = message.message?.extendedTextMessage?.contextInfo?.participant
+    const target = mentionedJids[0] || quotedSender || sender
+    if (!target) {
+      return await sendGroupReply(conn, from, '❌ Kein Nutzer gefunden. Markiere jemanden oder nutze /profile im Chat.', message)
     }
-}
 
+    const contact = conn.contacts?.[target] || {}
+    const name = contact.notify || contact.name || contact.vname || target.split('@')[0]
+    const number = target.split('@')[0]
+    const caption = `📸 Profilbild von ${name}\n📱 Nummer: ${number}`
 
-/**
- * Handle groups update
- * @param {import("@whiskeysockets/baileys").BaileysEventMap<unknown>["groups.update"]} groupsUpdate 
- */
-export async function groupsUpdate(groupsUpdate) {
-    if (opts["self"]) return
-    for (const groupUpdate of groupsUpdate) {
-        const id = groupUpdate.id
-        if (!id) continue
-        let chats = global.db.data.chats[id] || {}
-        const emoji = {
-            desc: '📝',
-            subject: '📌',
-            icon: '🖼️',
-            revoke: '🔗',
-            announceOn: '🔒',
-            announceOff: '🔓',
-            restrictOn: '🚫',
-            restrictOff: '✅',
-        }
+    const ppPromise = getProfilePicture(conn, target)
+    await sendLoadingProgress(conn, from, `🔎 Profil wird geladen für ${name}...`, message, 5000)
+    const ppUrl = await ppPromise
 
-        let text = ""
-        if (!chats.detect) continue
-
-        if (groupUpdate.desc) {
-            text = (chats.sDesc || this.sDesc || conn.sDesc || `*${emoji.desc} Description has been changed to*\n@desc`)
-                .replace("@desc", groupUpdate.desc)
-        } else if (groupUpdate.subject) {
-            text = (chats.sSubject || this.sSubject || conn.sSubject || `*${emoji.subject} Subject has been changed to*\n@subject`)
-                .replace("@subject", groupUpdate.subject)
-        } else if (groupUpdate.icon) {
-            text = (chats.sIcon || this.sIcon || conn.sIcon || `*${emoji.icon} Icon has been changed*`)
-                .replace("@icon", groupUpdate.icon)
-        } else if (groupUpdate.revoke) {
-            text = (chats.sRevoke || this.sRevoke || conn.sRevoke || `*${emoji.revoke} Group link has been changed to*\n@revoke`)
-                .replace("@revoke", groupUpdate.revoke)
-        } else if (groupUpdate.announce === true) {
-            text = (chats.sAnnounceOn || this.sAnnounceOn || conn.sAnnounceOn || `*${emoji.announceOn} Group is now closed!*`)
-        } else if (groupUpdate.announce === true) {
-            text = (chats.sAnnounceOff || this.sAnnounceOff || conn.sAnnounceOff || `*${emoji.announceOff} Group is now open!*`)
-        } else if (groupUpdate.restrict === true) {
-            text = (chats.sRestrictOn || this.sRestrictOn || conn.sRestrictOn || `*${emoji.restrictOn} Group is now restricted to participants only!*`)
-        } else if (groupUpdate.restrict === false) {
-            text = (chats.sRestrictOff || this.sRestrictOff || conn.sRestrictOff || `*${emoji.restrictOff} Group is now restricted to admins only!*`)
-        }
-        
-
-        if (!text) continue
-        await this.sendMessage(id, { text, mentions: this.parseMention(text) })
+    if (!ppUrl) {
+      return await sendGroupReply(conn, from, `❌ Profilbild konnte nicht geladen werden.\nName: ${name}\nNummer: ${number}`, message)
     }
-}
 
-/**
-Delete Chat
- */
-export async function deleteUpdate(message) {
+    return await conn.sendMessage(from, { image: { url: ppUrl }, caption }, { quoted: message })
+  }
+
+  if (command === '/tiktok') {
+    const parts = args.split(/\s+/).filter(Boolean)
+    const username = parts[0]?.replace(/^@/, '')
+    const proFlag = parts[1]?.toLowerCase() === 'pro'
+
+    if (!username || !proFlag) {
+      return await sendGroupReply(conn, from, '✳️ Bitte nutze: /tiktok <username> pro', message)
+    }
+
+    const progressText = `🔎 TikTok-Profil wird geladen: @${username}`
+    await sendLoadingProgress(conn, from, progressText, message)
+
     try {
-        
-       
-      if (typeof process.env.antidelete === 'undefined' || process.env.antidelete.toLowerCase() === 'false') return;
+      const profile = await fetchTikTokProfile(username)
+      const info = `*TikTok Profi*\n\n` +
+        `👤 Name: ${profile.nickname}\n` +
+        `🔗 Profil: ${profile.tiktokUrl}\n` +
+        `⭐ Verifiziert: ${profile.verified ? 'Ja' : 'Nein'}\n` +
+        `🔒 Privat: ${profile.private ? 'Ja' : 'Nein'}\n` +
+        `👥 Abos: ${profile.followerCount}\n` +
+        `👤 Folgt: ${profile.followingCount}\n` +
+        `❤️ Likes: ${profile.heartCount}\n` +
+        `🎬 Beiträge: ${profile.videoCount}\n` +
+        `📝 Bio: ${profile.bio || 'Keine Bio verfügbar.'}`
 
+      if (profile.avatar) {
+        return await conn.sendMessage(from, {
+          image: { url: profile.avatar },
+          caption: info
+        }, { quoted: message })
+      }
 
-        const {
-            fromMe,
-            id,
-            participant
-        } = message
-        if (fromMe)
-            return
-        let msg = this.serializeM(this.loadMessage(id))
-        if (!msg)
-            return
-        let chat = global.db.data.chats[msg.chat] || {}
-       
-            await this.reply(conn.user.id, `
-            ≡ deleted a message 
-            ┌─⊷  𝘼𝙉𝙏𝙄 𝘿𝙀𝙇𝙀𝙏𝙀 
-            ▢ *Number :* @${participant.split`@`[0]} 
-            └─────────────
-            `.trim(), msg, {
-                        mentions: [participant]
-                    })
-        this.copyNForward(conn.user.id, msg, false).catch(e => console.log(e, msg))
-    } catch (e) {
-        console.error(e)
+      return await sendGroupReply(conn, from, info, message)
+    } catch (error) {
+      return await sendGroupReply(conn, from, `❌ TikTok-Profil konnte nicht abgerufen werden: ${error.message || error}`, message)
     }
-}
+  }
 
-/*
- Polling Update 
-*/
-export async function pollUpdate(message) {
-  for (const { key, update } of message) {
-            if (message.pollUpdates) {
-                const pollCreation = await this.serializeM(this.loadMessage(key.id))
-                if (pollCreation) {
-                    const pollMessage = await getAggregateVotesInPollMessage({
-                        message: pollCreation.message,
-                        pollUpdates: pollCreation.pollUpdates,
-                    })
-                    message.pollUpdates[0].vote = pollMessage
-                    
-                    await console.log(pollMessage)
-                    this.appenTextMessage(message, message.pollUpdates[0].vote || pollMessage.filter((v) => v.voters.length !== 0)[0]?.name, message.message);
-                }
-            }
+  if (command === '/add') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    if (!await isGroupAdmin(conn, from, sender)) {
+      return await sendGroupReply(conn, from, '⚠️ Nur Gruppenadmins oder der Owner können Nutzer hinzufügen.', message)
+    }
+    if (!await isBotAdmin(conn, from)) {
+      return await sendGroupReply(conn, from, '⚠️ Ich benötige Adminrechte, um Nutzer hinzuzufügen.', message)
+    }
+    const number = args.split(/\s+/).find(Boolean)
+    const target = buildJidFromNumber(number)
+    if (!target) {
+      return await sendGroupReply(conn, from, '✳️ Bitte gib eine gültige internationale Nummer an, z.B. /add +491234567890', message)
+    }
+    if (target === conn.user?.id) {
+      return await sendGroupReply(conn, from, '⚠️ Ich kann mich nicht selbst zur Gruppe hinzufügen.', message)
+    }
+    try {
+      await conn.groupParticipantsUpdate(from, [target], 'add')
+      return await conn.sendMessage(from, {
+        text: '✅ <at> wurde zur Gruppe hinzugefügt.',
+        contextInfo: { mentionedJid: [target] }
+      }, { quoted: message })
+    } catch (error) {
+      return await sendGroupReply(conn, from, `❌ Nutzer konnte nicht hinzugefügt werden: ${error?.message || error}`, message)
+    }
+  }
+
+  if (command === '/like') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    const metadata = await getGroupMetadata(conn, from)
+    const participants = metadata?.participants || []
+    if (!participants.length) {
+      return await sendGroupReply(conn, from, '⚠️ Gruppeninformationen konnten nicht geladen werden.', message)
+    }
+
+    const mentionedJid = participants.map((p) => p.id)
+    const mentionText = mentionedJid.map(() => '<at>').join(' ')
+    const likeText = `❤️ Like für alle!
+${mentionText}`
+    return await conn.sendMessage(from, {
+      text: likeText,
+      contextInfo: { mentionedJid }
+    }, { quoted: message })
+  }
+
+  if (command === '/spike') {
+    if (!isGroup) return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    if (!await isGroupAdmin(conn, from, sender)) return await sendGroupReply(conn, from, '⚠️ Nur Admins können die Gruppensprache setzen.', message)
+
+    const chosen = args || ''
+    if (!chosen) {
+      // list available languages
+      const listText = `🌐 Verfügbare Sprachen:\n${supportedLanguages.join(', ')}`
+      return await sendGroupReply(conn, from, listText, message)
+    }
+
+    // try to match language case-insensitive
+    const match = supportedLanguages.find((l) => l.toLowerCase() === chosen.toLowerCase())
+    if (!match) return await sendGroupReply(conn, from, `⚠️ Sprache nicht gefunden. Nutze /spike um die Liste anzuzeigen.`, message)
+
+    groupLanguage.set(from, match)
+    // announce in the chosen language
+    const name = getContactName(conn, sender)
+    const welcome = getWelcomeFor(match, '<at>')
+    const admins = (await getGroupMetadata(conn, from))?.participants.filter((p) => p.admin === 'admin' || p.admin === 'superadmin').map((p) => p.id) || []
+    await conn.sendMessage(from, {
+      text: welcome,
+      contextInfo: { mentionedJid: admins.length ? admins : [sender] }
+    }, { quoted: message })
+
+    return
+  }
+
+  if (command === '/lesve' || command === '/leave') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    if (!await isGroupAdmin(conn, from, sender)) {
+      return await sendGroupReply(conn, from, '⚠️ Nur Gruppenadmins oder der Owner können mich die Gruppe verlassen lassen.', message)
+    }
+    await conn.sendMessage(from, { text: '👋 Ich wurde geschickt, um den Admins zu helfen. Ich verlasse nun die Gruppe.' }, { quoted: message })
+    await conn.groupLeave(from)
+    return
+  }
+
+  if (command === '/lösche') {
+    const lowerArgs = args.toLowerCase()
+    const quotedInfo = message.message?.extendedTextMessage?.contextInfo
+    const quotedKey = buildQuotedMessageKey(from, quotedInfo)
+
+    if (lowerArgs.startsWith('deine letzte')) {
+      const key = lastUserMessageKey.get(historyKey)
+      if (!key) {
+        return await sendGroupReply(conn, from, '⚠️ Ich habe keine letzte Nachricht zum Löschen gefunden.', message)
+      }
+      const deleted = await deleteMessage(conn, from, key)
+      return await sendGroupReply(conn, from, deleted ? '✅ Deine letzte Nachricht wurde gelöscht.' : '❌ Die Nachricht konnte nicht gelöscht werden.', message)
+    }
+
+    if (lowerArgs.startsWith('alle')) {
+      if (!isGroup) {
+        return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+      }
+      if (!await isGroupAdmin(conn, from, sender)) {
+        return await sendGroupReply(conn, from, '⚠️ Nur Gruppenadmins können alle Nachrichten löschen.', message)
+      }
+      if (!await isBotAdmin(conn, from)) {
+        return await sendGroupReply(conn, from, '⚠️ Ich brauche Adminrechte, um alle Nachrichten zu löschen.', message)
+      }
+      const history = groupMessageHistory.get(from) || []
+      if (!history.length) {
+        return await sendGroupReply(conn, from, '⚠️ Keine Nachrichten zum Löschen gefunden.', message)
+      }
+      const uniqueKeys = [...new Map(history.map((key) => [`${key.remoteJid}|${key.id}|${key.participant || ''}`, key])).values()]
+      let deletedCount = 0
+      for (const msgKey of uniqueKeys) {
+        const ok = await deleteMessage(conn, from, msgKey)
+        if (ok) deletedCount++
+      }
+      groupMessageHistory.set(from, [])
+      return await sendGroupReply(conn, from, `✅ Ich habe ${deletedCount} Nachrichten in dieser Gruppe zum Löschen angefragt.`, message)
+    }
+
+    if (quotedKey) {
+      const quotedSender = quotedInfo.participant || sender
+      if (quotedSender !== sender) {
+        if (!isGroup) {
+          return await sendGroupReply(conn, from, '⚠️ Ich kann nur eigene Nachrichten in privaten Chats löschen.', message)
         }
-}
-
-/*
-Update presence
-*/
-export async function presenceUpdate(presenceUpdate) {
-    const id = presenceUpdate.id;
-    const nouser = Object.keys(presenceUpdate.presences);
-    const status = presenceUpdate.presences[nouser]?.lastKnownPresence;
-    const user = global.db.data.users[nouser[0]];
-
-    if (user?.afk && status === "composing" && user.afk > -1) {
-        if (user.banned) {
-            user.afk = -1;
-            user.afkReason = "User Banned Afk";
-            return;
+        if (!await isGroupAdmin(conn, from, sender)) {
+          return await sendGroupReply(conn, from, '⚠️ Nur Admins können fremde Nachrichten löschen.', message)
         }
-
-        await console.log("AFK");
-        const username = nouser[0].split("@")[0];
-        const timeAfk = new Date() - user.afk;
-        const caption = `\n@${username} has stopped being AFK and is currently typing.\n\nReason: ${
-            user.afkReason ? user.afkReason : "No Reason"
-          }\nFor the past ${timeAfk.toTimeString()}.\n`;
-          
-
-        this.reply(id, caption, null, {
-            mentions: this.parseMention(caption)
-        });
-        user.afk = -1;
-        user.afkReason = "";
+        if (!await isBotAdmin(conn, from)) {
+          return await sendGroupReply(conn, from, '⚠️ Ich brauche Adminrechte, um fremde Nachrichten zu löschen.', message)
+        }
+      }
+      const deleted = await deleteMessage(conn, from, quotedKey)
+      return await sendGroupReply(conn, from, deleted ? '✅ Die markierte Nachricht wurde gelöscht.' : '❌ Die markierte Nachricht konnte nicht gelöscht werden.', message)
     }
+
+    return await sendGroupReply(conn, from, '✳️ Verwende /lösche deine letzte nachricht, /lösche markierte nachricht oder /lösche alle.', message)
+  }
+
+  if (command === '/ranklist') {
+    return await sendGroupReply(conn, from, `*Ränge*\n\n${getRankListText()}`, message)
+  }
+
+  if (command === '/myinfo') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    const key = getGroupUserKey(from, sender)
+    const level = userLevel.get(key) || 1
+    const xp = userXp.get(key) || 0
+    const nextThreshold = level * 100
+    const needed = Math.max(0, nextThreshold - xp)
+    const rank = getRankName(level)
+    const contact = conn.contacts?.[sender] || {}
+    const name = contact.notify || contact.name || contact.vname || sender.split('@')[0]
+    const caption = `👤 ${name}\n⭐ Level: ${level}\n💠 XP: ${xp}\n⏳ Bis nächstes Level: ${needed}\n🏅 Rang: ${rank}`
+
+    await sendLoadingProgress(conn, from, `🔎 Deine Info wird geladen...`, message, 5000)
+    const ppUrl = await getProfilePicture(conn, sender)
+
+    if (!ppUrl) {
+      return await sendGroupReply(conn, from, `*Deine Info*\n\n${caption}`, message)
+    }
+
+    return await conn.sendMessage(from, { image: { url: ppUrl }, caption }, { quoted: message })
+  }
+
+  if (command === '/afk') {
+    const reason = args || 'AFK'
+    afkUsers.set(sender, { reason, since: Date.now() })
+    return await sendGroupReply(conn, from, `🔕 Du bist jetzt AFK: ${reason}`, message)
+  }
+
+  if (command === '/xp') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    if (!await isGroupAdmin(conn, from, sender)) {
+      return await sendGroupReply(conn, from, '⚠️ Nur Admins können XP ein- oder ausschalten.', message)
+    }
+    if (args.toLowerCase().startsWith('off')) {
+      groupXpEnabled.set(from, false)
+      return await sendGroupReply(conn, from, '✅ XP wurde für diese Gruppe deaktiviert.', message)
+    }
+    if (args.toLowerCase().startsWith('on')) {
+      groupXpEnabled.set(from, true)
+      return await sendGroupReply(conn, from, '✅ XP wurde für diese Gruppe aktiviert.', message)
+    }
+    const xpKey = getGroupUserKey(from, sender)
+    const level = userLevel.get(xpKey) || 1
+    const xp = userXp.get(xpKey) || 0
+    return await sendGroupReply(conn, from, `📊 Dein Level: ${level}\n💠 XP: ${xp}`, message)
+  }
+
+  if (command === '/be') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    if (!await isGroupAdmin(conn, from, sender)) {
+      return await sendGroupReply(conn, from, '⚠️ Nur Admins können Begrüßungen ein- oder ausschalten.', message)
+    }
+    const current = groupWelcomeEnabled.get(from) !== false
+    groupWelcomeEnabled.set(from, !current)
+    const stateText = current ? 'deaktiviert' : 'aktiviert'
+    return await sendGroupReply(conn, from, `✅ Begrüßungen wurden ${stateText}.`, message)
+  }
+
+  if (command === '/kick') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    if (!await isGroupAdmin(conn, from, sender)) {
+      return await sendGroupReply(conn, from, '⚠️ Nur Admins können Nutzer entfernen.', message)
+    }
+    if (!await isBotAdmin(conn, from)) {
+      return await sendGroupReply(conn, from, '⚠️ Ich benötige Adminrechte, um Nutzer zu entfernen.', message)
+    }
+
+    const lowerArgs = args.toLowerCase()
+    if (lowerArgs.includes('all')) {
+      const metadata = await getGroupMetadata(conn, from)
+      const toRemove = metadata?.participants
+        .filter((p) => {
+          const isBot = p.id === conn.user?.id
+          const isAdmin = p.admin === 'admin' || p.admin === 'superadmin'
+          return !isBot && !isAdmin
+        })
+        .map((p) => p.id) || []
+      if (!toRemove.length) {
+        return await sendGroupReply(conn, from, '⚠️ Es gibt keine nicht-admin Nutzer zum Entfernen.', message)
+      }
+      await conn.groupParticipantsUpdate(from, toRemove, 'remove')
+      return await sendGroupReply(conn, from, `✅ Alle nicht-admin Nutzer wurden entfernt (${toRemove.length}).`, message)
+    }
+
+    const mentionedJids = getMentionedJids(message)
+    if (!mentionedJids.length) {
+      return await sendGroupReply(conn, from, '✳️ Bitte erwähne den Nutzer, den ich entfernen soll.', message)
+    }
+
+    const target = mentionedJids[0]
+    const targetName = getContactName(conn, target)
+    const targetIsBot = isProbablyBot(conn, target)
+
+    if (target === conn.user?.id) {
+      await conn.sendMessage(from, { text: `✅ Ich habe mich selbst entfernt.`, contextInfo: { mentionedJid: [target] } }, { quoted: message })
+      await conn.groupLeave(from)
+      return
+    }
+
+    await conn.groupParticipantsUpdate(from, [target], 'remove')
+    const botLabel = targetIsBot ? 'Ein anderer Bot' : 'Ein Nutzer'
+    return await conn.sendMessage(from, {
+      text: `✅ <at> wurde entfernt von *${botName}*.
+${botLabel}: ${targetName}`,
+      contextInfo: { mentionedJid: [target] }
+    }, { quoted: message })
+  }
+
+  if (command === '/addp') {
+    if (!isGroup) {
+      return await sendGroupReply(conn, from, '⚠️ Dieser Befehl funktioniert nur in Gruppen.', message)
+    }
+    if (!await isGroupAdmin(conn, from, sender)) {
+      return await sendGroupReply(conn, from, '⚠️ Nur Admins können das Gruppenbild ändern.', message)
+    }
+    if (!await isBotAdmin(conn, from)) {
+      return await sendGroupReply(conn, from, '⚠️ Ich benötige Adminrechte, um das Gruppenbild zu ändern.', message)
+    }
+    if (!args) {
+      return await sendGroupReply(conn, from, '✳️ Bitte sende einen Bild-Link hinter /addp.', message)
+    }
+    try {
+      const response = await fetch(args)
+      if (!response.ok) throw new Error('Bild konnte nicht geladen werden.')
+      const buffer = Buffer.from(await response.arrayBuffer())
+      const upload = { image: buffer }
+      await conn.updateProfilePicture(from, upload)
+      return await sendGroupReply(conn, from, '✅ Das Gruppenbild wurde erfolgreich geändert.', message)
+    } catch (error) {
+      return await sendGroupReply(conn, from, `❌ Gruppenbild konnte nicht aktualisiert werden: ${error.message || error}`, message)
+    }
+  }
+
+  if (isGroup && groupXpEnabled.get(from) !== false) {
+    const key = getGroupUserKey(from, sender)
+    const hasLevel = userLevel.has(key)
+    const hasXp = userXp.has(key)
+
+    if (!hasLevel && !hasXp) {
+      userLevel.set(key, 1)
+      userXp.set(key, 0)
+      return await conn.sendMessage(from, {
+        text: `🎉 <at> hat Level 1 erreicht! Du startest jetzt mit Level 1.`,
+        contextInfo: { mentionedJid: [sender] }
+      }, { quoted: message })
+    }
+
+    const currentLevel = userLevel.get(key) || 1
+    const currentXp = userXp.get(key) || 0
+    const textLength = Math.max(1, trimmed.length)
+    const wordCount = trimmed.split(/\s+/).filter(Boolean).length
+    const baseXp = Math.min(8000, Math.max(1, Math.floor(textLength * 3 + wordCount * 10)))
+    const gain = Math.min(8000, Math.floor(baseXp * (1 + currentLevel * 0.05)))
+    const newXp = currentXp + gain
+    const threshold = currentLevel * 1000
+    const oldRank = getRankName(currentLevel)
+
+    if (newXp >= threshold) {
+      const nextLevel = currentLevel + 1
+      userLevel.set(key, nextLevel)
+      userXp.set(key, newXp - threshold)
+      const newRank = getRankName(nextLevel)
+      let levelUpText = `🎉 <at> hat Level ${nextLevel} erreicht!`
+      if (newRank !== oldRank) {
+        levelUpText += `\n🏅 Neuer Rang: ${newRank}`
+      }
+      await conn.sendMessage(from, {
+        text: levelUpText,
+        contextInfo: { mentionedJid: [sender] }
+      }, { quoted: message })
+    } else {
+      userXp.set(key, newXp)
+    }
+  }
 }
 
+export async function handleParticipantsUpdate(update, conn) {
+  const { id, participants, action } = update
+  if (!id || !participants?.length) return
 
-/**
-dfail
- */
-global.dfail = (type, m, conn) => {
-    const userTag = `👋 Hai *@${m.sender.split("@")[0]}*, `
-    const emoji = {
-        general: '⚙️',
-        owner: '👑',
-        moderator: '🛡️',
-        premium: '💎',
-        group: '👥',
-        private: '📱',
-        admin: '👤',
-        botAdmin: '🤖',
-        unreg: '🔒',
-        nsfw: '🔞',
-        rpg: '🎮',
-        restrict: '⛔',
+  const botId = conn.user?.id
+  if (!botId) return
+
+  if (participants.includes(botId)) {
+    if (action !== 'add') return
+    if (pendingGroupJoin.has(id)) {
+      pendingGroupJoin.delete(id)
+      return
     }
+    await conn.sendMessage(id, { text: '⚠️ Ich wurde direkt eingeladen, ohne privaten /join. Ich verlasse diese Gruppe jetzt.' })
+    await conn.groupLeave(id)
+    return
+  }
 
-    const msg = {
-        owner: `*${emoji.owner} Owner's Query*\n
-    ${userTag} This command can only be used by the *Bot Owner*!`,
-        moderator: `*${emoji.moderator} Moderator's Query*\n
-    ${userTag} This command can only be used by *Moderators*!`,
-        premium: `*${emoji.premium} Premium Query*\n
-    ${userTag} This command is only for *Premium Members*!`,
-        group: `*${emoji.group} Group Query*\n
-    ${userTag} This command can only be used in *Group Chats*!`,
-        private: `*${emoji.private} Private Query*\n
-    ${userTag} This command can only be used in *Private Chats*!`,
-        admin: `*${emoji.admin} Admin's Query*\n
-    ${userTag} This command is only for *Group Admins*!`,
-        botAdmin: `*${emoji.botAdmin} Bot Admin's Query*\n
-    ${userTag} Make the bot an *Admin* to use this command!`,
-        unreg: `*${emoji.unreg} Registration Query*\n
-    ${userTag} Please register to use this feature by typing:\n\n*#register name.age*\n\nExample: *#register ${m.name}.18*!`,
-        nsfw: `*${emoji.nsfw} NSFW Query*\n
-    ${userTag} NSFW is not active. Please contact the Group admin to enable this feature!`,
-        restrict: `*${emoji.restrict} Inactive Feature Query*\n
-    ${userTag} This feature is *disabled*!`,
+  if (action === 'add' && groupWelcomeEnabled.get(id)) {
+    for (const userId of participants) {
+      await greetNewMember(conn, id, userId)
     }
-     [type]
-    if (msg) return  m.reply(msg)
-
+  }
 }
-
-let file = global.__filename(import.meta.url, true)
-watchFile(file, async () => {
-    unwatchFile(file)
-    console.log(chalk.redBright("Update handler.js"))
-    if (global.reloadHandler) console.log(await global.reloadHandler())
-})
